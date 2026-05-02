@@ -361,6 +361,49 @@ def form_table():
     except Exception as e:
         return jsonify({"error":str(e)}), 500
 
+
+@app.route("/api/predict_fixtures", methods=["POST"])
+def predict_fixtures():
+    """Accept fixture list from browser and run predictions"""
+    try:
+        body     = request.get_json(force=True) or {}
+        fixtures = body.get("fixtures", [])
+        gameweek = body.get("gameweek", "?")
+        season   = body.get("season", "2025-26")
+        if not fixtures:
+            return jsonify({"error": "No fixtures provided"}), 400
+        df    = get_df()
+        model = get_model()
+        out   = []
+        for f in fixtures:
+            ht = f.get("home", "").strip()
+            at = f.get("away", "").strip()
+            dt = f.get("date", "")
+            if not ht or not at: continue
+            hf    = get_form(df, ht)
+            af    = get_form(df, at)
+            pred  = predict_match(ht, at, model, hf["multiplier"], af["multiplier"])
+            cards = get_cards(df, ht, at)
+            h2h   = get_h2h(df, ht, at)
+            if pred:
+                out.append({
+                    "fixture_id": f"{ht}-{at}-{dt}",
+                    "match_date": dt, "match_time": f.get("time", ""),
+                    "status": "SCHEDULED", "home_team": ht, "away_team": at,
+                    "prediction": pred, "cards": cards,
+                    "home_form": hf, "away_form": af,
+                    "head_to_head": h2h, "actual": None,
+                })
+        return jsonify({
+            "gameweek": gameweek, "season": season,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model_version": "v5", "source": "upcoming",
+            "model_accuracy": {"overall":53.3,"home_win":53.9,"away_win":52.7,"over_under":58.0},
+            "fixtures": out,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
