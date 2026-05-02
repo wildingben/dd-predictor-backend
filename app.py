@@ -1,9 +1,8 @@
 """
-DD Predictor — Flask Backend API v4
-=====================================
-- Uses CSV for historical data and predictions
-- Fetches upcoming fixtures from football-data.co.uk fixtures CSV
-- No external API key restrictions
+DD Predictor — Flask Backend API (Clean Version)
+=================================================
+Uses football-data.org API directly — no IP restrictions on paid tier.
+Fixtures, results and predictions all from one clean source.
 """
 
 import os
@@ -25,12 +24,54 @@ app = Flask(__name__)
 CORS(app)
 
 DATA_PATH     = os.environ.get("DATA_PATH", "data/processed/all_seasons.csv")
+FD_API_KEY    = os.environ.get("FOOTBALL_API_KEY", "642390403d9549ebbeb29c158f77dfcd")
+FD_BASE       = "https://api.football-data.org/v4"
+FD_HEADERS    = {"X-Auth-Token": FD_API_KEY}
+
 DC_RHO        = 0.10
 FORM_WEIGHT   = 0.25
 TIME_DECAY    = 0.0018
 DRAW_MIN_PROB = 0.27
 MAX_GOALS     = 8
 
+# Team name mapping from API to our CSV names
+TEAM_MAP = {
+    "Manchester City FC":         "Man City",
+    "Manchester United FC":       "Man United",
+    "Arsenal FC":                 "Arsenal",
+    "Liverpool FC":               "Liverpool",
+    "Chelsea FC":                 "Chelsea",
+    "Tottenham Hotspur FC":       "Tottenham",
+    "Newcastle United FC":        "Newcastle",
+    "Aston Villa FC":             "Aston Villa",
+    "West Ham United FC":         "West Ham",
+    "Brighton & Hove Albion FC":  "Brighton",
+    "Wolverhampton Wanderers FC": "Wolves",
+    "Fulham FC":                  "Fulham",
+    "Brentford FC":               "Brentford",
+    "Crystal Palace FC":          "Crystal Palace",
+    "Everton FC":                 "Everton",
+    "Nottingham Forest FC":       "Nott'm Forest",
+    "Bournemouth AFC":            "Bournemouth",
+    "AFC Bournemouth":            "Bournemouth",
+    "Leicester City FC":          "Leicester",
+    "Ipswich Town FC":            "Ipswich",
+    "Southampton FC":             "Southampton",
+    "Luton Town FC":              "Luton",
+    "Burnley FC":                 "Burnley",
+    "Sheffield United FC":        "Sheffield United",
+    "Sunderland AFC":             "Sunderland",
+    "Leeds United FC":            "Leeds",
+    "Coventry City FC":           "Coventry",
+    "Middlesbrough FC":           "Middlesbrough",
+    "Watford FC":                 "Watford",
+    "Norwich City FC":            "Norwich",
+}
+
+def norm(name):
+    return TEAM_MAP.get(name, name)
+
+# ── CACHE ──
 _df_cache    = None
 _model_cache = None
 
@@ -54,6 +95,7 @@ def reload_data():
     _model_cache = None
     return get_model()
 
+# ── DIXON-COLES MLE ──
 def dc_tau(hg, ag, lh, la, rho):
     if hg == 0 and ag == 0: return 1 - lh * la * rho
     elif hg == 0 and ag == 1: return 1 + lh * rho
@@ -79,11 +121,11 @@ def dc_ll(params, teams, hts, ats, hgs, ags, ws):
     return -ll
 
 def fit_model(df):
-    teams = sorted(set(df["HomeTeam"].tolist() + df["AwayTeam"].tolist()))
-    n     = len(teams)
-    now   = pd.Timestamp.now()
-    ws    = np.exp(-TIME_DECAY * (now - df["Date"]).dt.days.values)
-    x0    = np.concatenate([np.ones(n), -np.ones(n), [0.3]])
+    teams  = sorted(set(df["HomeTeam"].tolist() + df["AwayTeam"].tolist()))
+    n      = len(teams)
+    now    = pd.Timestamp.now()
+    ws     = np.exp(-TIME_DECAY * (now - df["Date"]).dt.days.values)
+    x0     = np.concatenate([np.ones(n), -np.ones(n), [0.3]])
     bounds = [(0.1,4.0)]*n + [(-3.0,0.0)]*n + [(0.0,1.0)]
     res = minimize(dc_ll, x0,
                    args=(teams, df["HomeTeam"].tolist(), df["AwayTeam"].tolist(),
@@ -97,6 +139,7 @@ def fit_model(df):
         "teams":          teams,
     }
 
+# ── PREDICTION ──
 def poisson_prob(lam, k):
     try: return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
     except: return 0.0
@@ -113,20 +156,21 @@ def predict_match(ht, at, model, hfm=1.0, afm=1.0):
     ph  = float(np.sum(np.tril(pm,-1)))
     pd_ = float(np.sum(np.diag(pm)))
     pa  = float(np.sum(np.triu(pm,1)))
-    res = "D" if pd_ >= DRAW_MIN_PROB else ("H" if ph >= pa else "A")
+    result = "D" if pd_ >= DRAW_MIN_PROB else ("H" if ph >= pa else "A")
     bh, ba = np.unravel_index(pm.argmax(), pm.shape)
     top5 = pm.flatten().argsort()[-5:][::-1]
-    scores = [{"score":f"{i//(MAX_GOALS+1)}-{i%(MAX_GOALS+1)}",
-               "probability":round(float(pm[i//(MAX_GOALS+1)][i%(MAX_GOALS+1)])*100,1)} for i in top5]
+    scores = [{"score": f"{i//(MAX_GOALS+1)}-{i%(MAX_GOALS+1)}",
+               "probability": round(float(pm[i//(MAX_GOALS+1)][i%(MAX_GOALS+1)])*100, 1)}
+              for i in top5]
     return {
-        "predicted_result": res,
-        "predicted_result_label": {"H":"Home Win","D":"Draw","A":"Away Win"}[res],
-        "prob_home_win":    round(ph*100,1),
-        "prob_draw":        round(pd_*100,1),
-        "prob_away_win":    round(pa*100,1),
-        "expected_home_goals": round(float(lh),2),
-        "expected_away_goals": round(float(la),2),
-        "expected_total_goals": round(float(lh+la),2),
+        "predicted_result": result,
+        "predicted_result_label": {"H":"Home Win","D":"Draw","A":"Away Win"}[result],
+        "prob_home_win":    round(ph*100, 1),
+        "prob_draw":        round(pd_*100, 1),
+        "prob_away_win":    round(pa*100, 1),
+        "expected_home_goals": round(float(lh), 2),
+        "expected_away_goals": round(float(la), 2),
+        "expected_total_goals": round(float(lh+la), 2),
         "predicted_score":  f"{bh}-{ba}",
         "likely_scores":    scores,
         "over_25":          bool(lh+la > 2.5),
@@ -140,11 +184,12 @@ def get_form(df, team, n=6):
     games = pd.concat([home[["Date","Result"]], away[["Date","Result"]]])
     games = games.sort_values("Date", ascending=False).head(n)
     if len(games) == 0:
-        return {"multiplier":1.0,"form_string":"","recent_points":0}
+        return {"multiplier":1.0, "form_string":"", "recent_points":0}
     dw  = np.exp(-0.25*np.arange(len(games)))
     pts = games["Result"].map({"W":3,"D":1,"L":0}).values
     mult = round(0.90+(np.average(pts,weights=dw)/3.0)*0.20, 4)
-    return {"multiplier":float(mult),"form_string":"".join(games["Result"].tolist()),
+    return {"multiplier":float(mult),
+            "form_string":"".join(games["Result"].tolist()),
             "recent_points":int(games["Result"].map({"W":3,"D":1,"L":0}).sum())}
 
 def get_cards(df, ht, at):
@@ -153,46 +198,71 @@ def get_cards(df, ht, at):
     lay = float(df["AY"].mean()) if "AY" in df.columns else 2.0
     hy = float(hg["HY"].mean()) if len(hg)>3 else lhy
     ay = float(ag["AY"].mean()) if len(ag)>3 else lay
-    return {"pred_home_yellows":round(hy,1),"pred_away_yellows":round(ay,1),
+    return {"pred_home_yellows":round(hy,1), "pred_away_yellows":round(ay,1),
             "pred_total_yellows":round(hy+ay,1)}
 
 def get_h2h(df, ht, at, n=5):
     mask = (((df["HomeTeam"]==ht)&(df["AwayTeam"]==at))|
             ((df["HomeTeam"]==at)&(df["AwayTeam"]==ht)))
     h2h = df[mask].sort_values("Date",ascending=False).head(n)
-    return [{"date":r["Date"].strftime("%Y-%m-%d"),"home_team":r["HomeTeam"],
-             "away_team":r["AwayTeam"],"score":f"{int(r['FTHG'])}-{int(r['FTAG'])}",
+    return [{"date":r["Date"].strftime("%Y-%m-%d"), "home_team":r["HomeTeam"],
+             "away_team":r["AwayTeam"], "score":f"{int(r['FTHG'])}-{int(r['FTAG'])}",
              "result":r["FTR"]} for _,r in h2h.iterrows()]
 
-def build_fixture_list(rows, df, model, gameweek, season, source="csv"):
-    out = []
-    for _, m in rows.iterrows():
-        ht = str(m["HomeTeam"]).strip()
-        at = str(m["AwayTeam"]).strip()
-        dt = m["Date"].strftime("%Y-%m-%d") if hasattr(m["Date"], "strftime") else str(m["Date"])[:10]
-        hf = get_form(df, ht); af = get_form(df, at)
-        pred = predict_match(ht, at, model, hf["multiplier"], af["multiplier"])
-        if not pred: continue
+def process_matches(matches, gameweek, season, source="api"):
+    """Run predictions on a list of match objects from the API"""
+    df    = get_df()
+    model = get_model()
+    out   = []
+
+    for m in matches:
+        ht = norm(m["homeTeam"]["name"])
+        at = norm(m["awayTeam"]["name"])
+        dt = m.get("utcDate","")[:10]
+        tm = m.get("utcDate","")[11:16]
+
+        hf    = get_form(df, ht)
+        af    = get_form(df, at)
+        pred  = predict_match(ht, at, model, hf["multiplier"], af["multiplier"])
         cards = get_cards(df, ht, at)
         h2h   = get_h2h(df, ht, at)
+
+        if not pred: continue
+
+        status = m.get("status","SCHEDULED")
         actual = None
-        ftr = m.get("FTR","") if source=="csv" else ""
-        if pd.notna(ftr) and str(ftr) in ["H","D","A"]:
-            actual = {"home_goals":int(m["FTHG"]),"away_goals":int(m["FTAG"]),"result":ftr}
+        if status == "FINISHED":
+            score = m.get("score",{}).get("fullTime",{})
+            hg = score.get("home") or 0
+            ag = score.get("away") or 0
+            actual = {
+                "home_goals": hg, "away_goals": ag,
+                "result": "H" if hg > ag else "D" if hg == ag else "A"
+            }
+
         out.append({
-            "fixture_id":f"{ht}-{at}-{dt}","match_date":dt,
-            "match_time":str(m.get("Time",""))[:5] if "Time" in m.index else "",
-            "status":"FINISHED" if actual else "SCHEDULED",
-            "home_team":ht,"away_team":at,"prediction":pred,
-            "cards":cards,"home_form":hf,"away_form":af,
-            "head_to_head":h2h,"actual":actual,
+            "fixture_id":   m.get("id"),
+            "match_date":   dt,
+            "match_time":   tm,
+            "status":       status,
+            "home_team":    ht,
+            "away_team":    at,
+            "prediction":   pred,
+            "cards":        cards,
+            "home_form":    hf,
+            "away_form":    af,
+            "head_to_head": h2h,
+            "actual":       actual,
         })
+
     return jsonify({
-        "gameweek":gameweek,"season":season,
-        "generated_at":datetime.now(timezone.utc).isoformat(),
-        "model_version":"v5","source":source,
-        "model_accuracy":{"overall":53.3,"home_win":53.9,"away_win":52.7,"over_under":58.0},
-        "fixtures":out,
+        "gameweek":      gameweek,
+        "season":        season,
+        "generated_at":  datetime.now(timezone.utc).isoformat(),
+        "model_version": "v5",
+        "source":        source,
+        "model_accuracy": {"overall":53.3,"home_win":53.9,"away_win":52.7,"over_under":58.0},
+        "fixtures":      out,
     })
 
 # ── ROUTES ──
@@ -201,11 +271,11 @@ def build_fixture_list(rows, df, model, gameweek, season, source="csv"):
 def health():
     df = get_df()
     return jsonify({
-        "status":"ok","model":"DD Predictor v5",
-        "timestamp":datetime.now(timezone.utc).isoformat(),
-        "seasons":df["Season"].unique().tolist(),
-        "latest_season":df["Season"].max(),
-        "total_fixtures":len(df),
+        "status": "ok", "model": "DD Predictor v5",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "seasons": df["Season"].unique().tolist(),
+        "latest_season": df["Season"].max(),
+        "total_fixtures": len(df),
     })
 
 @app.route("/api/seasons")
@@ -216,74 +286,48 @@ def seasons():
         s = df[df["Season"]==season]
         gws = sorted(s["GW"].unique().tolist())
         result.append({"season":season,"gameweeks":gws,"max_gw":max(gws),"fixtures":len(s)})
-    return jsonify({"seasons":result})
+    return jsonify({"seasons": result})
 
-@app.route("/api/predictions/<int:gameweek>", methods=["GET","POST"])
+@app.route("/api/predictions/<int:gameweek>")
 def predictions(gameweek):
-    """Historical gameweek predictions from CSV"""
-    try:
-        df     = get_df()
-        model  = get_model()
-        season = request.args.get("season", df["Season"].max())
-        rows   = df[(df["Season"]==season) & (df["GW"]==gameweek)]
-        if len(rows) == 0:
-            available = sorted(df[df["Season"]==season]["GW"].unique())
-            return jsonify({"error":f"GW{gameweek} not found in {season}. Available: {available}"}), 404
-        return build_fixture_list(rows, df, model, gameweek, season, source="csv")
-    except Exception as e:
-        return jsonify({"error":str(e)}), 500
-
-@app.route("/api/upcoming/<int:gameweek>")
-def upcoming(gameweek):
     """
-    Fetch upcoming fixtures from football-data.co.uk and predict them.
-    Works for any future gameweek — no CSV update needed.
+    Fetch fixtures from football-data.org API and run predictions.
+    Works for both past (shows actual results) and future gameweeks.
+    Tries current season first, then falls back to previous season.
     """
     try:
-        df    = get_df()
-        model = get_model()
+        url = f"{FD_BASE}/competitions/PL/matches"
 
-        # Pull fixtures CSV from football-data.co.uk
-        resp = requests.get("https://www.football-data.co.uk/fixtures.csv", timeout=15)
-        resp.raise_for_status()
-        fix_df = pd.read_csv(io.StringIO(resp.text), encoding="latin1")
+        # Try current season (2025) first, then previous (2024)
+        matches = []
+        season_label = "2025-26"
+        for year, label in [(2025, "2025-26"), (2024, "2024-25")]:
+            resp = requests.get(url, headers=FD_HEADERS,
+                                params={"matchday": gameweek, "season": year},
+                                timeout=15)
+            if resp.status_code == 200:
+                matches = resp.json().get("matches", [])
+                if matches:
+                    season_label = label
+                    break
 
-        # Filter to Premier League
-        if "Div" in fix_df.columns:
-            fix_df = fix_df[fix_df["Div"] == "E0"]
+        if not matches:
+            return jsonify({"error": f"No fixtures found for Gameweek {gameweek}."}), 404
 
-        fix_df["Date"] = pd.to_datetime(fix_df["Date"], dayfirst=True, errors="coerce")
-        fix_df = fix_df.dropna(subset=["Date","HomeTeam","AwayTeam"])
-        fix_df = fix_df.sort_values("Date").reset_index(drop=True)
-
-        # Assign GW numbers — offset from last played GW
-        current_season = df["Season"].max()
-        season_df = df[df["Season"]==current_season]
-        max_played_gw = int(season_df["GW"].max()) if len(season_df) > 0 else 34
-        fix_df["GW"] = fix_df.index // 10 + max_played_gw + 1
-
-        gw_rows = fix_df[fix_df["GW"]==gameweek]
-
-        if len(gw_rows) == 0:
-            available = sorted(fix_df["GW"].unique().tolist())
-            return jsonify({
-                "error": f"GW{gameweek} not found in upcoming fixtures.",
-                "available_upcoming": available,
-            }), 404
-
-        return build_fixture_list(gw_rows, df, model, gameweek, current_season, source="upcoming")
+        return process_matches(matches, gameweek, season_label)
 
     except Exception as e:
-        return jsonify({"error":str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/reload", methods=["POST"])
 def reload():
     try:
         model = reload_data()
         df    = get_df()
-        return jsonify({"status":"reloaded","fixtures":len(df),"seasons":df["Season"].unique().tolist(),"teams":len(model["teams"])})
+        return jsonify({"status":"reloaded","fixtures":len(df),
+                        "seasons":df["Season"].unique().tolist(),"teams":len(model["teams"])})
     except Exception as e:
-        return jsonify({"error":str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/team/<team_name>")
 def team_stats(team_name):
@@ -293,18 +337,24 @@ def team_stats(team_name):
         away = df[df["AwayTeam"]==team_name]
         all_games = len(home)+len(away)
         if all_games == 0:
-            return jsonify({"error":f"Team '{team_name}' not found"}), 404
+            return jsonify({"error": f"Team '{team_name}' not found"}), 404
+
         h = home[["Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR","HY","AY"]].copy()
-        h["TeamGoals"]=h["FTHG"]; h["OppGoals"]=h["FTAG"]; h["Opponent"]=h["AwayTeam"]
-        h["Venue"]="Home"; h["Result"]=h["FTR"].map({"H":"W","D":"D","A":"L"}); h["Yellows"]=h["HY"]
+        h["TeamGoals"]=h["FTHG"]; h["OppGoals"]=h["FTAG"]
+        h["Opponent"]=h["AwayTeam"]; h["Venue"]="Home"
+        h["Result"]=h["FTR"].map({"H":"W","D":"D","A":"L"}); h["Yellows"]=h["HY"]
+
         a = away[["Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR","HY","AY"]].copy()
-        a["TeamGoals"]=a["FTAG"]; a["OppGoals"]=a["FTHG"]; a["Opponent"]=a["HomeTeam"]
-        a["Venue"]="Away"; a["Result"]=a["FTR"].map({"A":"W","D":"D","H":"L"}); a["Yellows"]=a["AY"]
+        a["TeamGoals"]=a["FTAG"]; a["OppGoals"]=a["FTHG"]
+        a["Opponent"]=a["HomeTeam"]; a["Venue"]="Away"
+        a["Result"]=a["FTR"].map({"A":"W","D":"D","H":"L"}); a["Yellows"]=a["AY"]
+
         recent = pd.concat([h,a]).sort_values("Date",ascending=False).head(10)
         last_10 = [{"date":r["Date"].strftime("%Y-%m-%d"),"opponent":r["Opponent"],
                     "venue":r["Venue"],"score":f"{int(r['TeamGoals'])}-{int(r['OppGoals'])}",
                     "result":r["Result"],"yellows":int(r["Yellows"]) if not pd.isna(r["Yellows"]) else 0}
                    for _,r in recent.iterrows()]
+
         seasons_out = []
         for season in sorted(df["Season"].unique()):
             sh=df[(df["HomeTeam"]==team_name)&(df["Season"]==season)]
@@ -314,27 +364,32 @@ def team_stats(team_name):
             sw=int((sh["FTR"]=="H").sum()+(sa["FTR"]=="A").sum())
             sd=int((sh["FTR"]=="D").sum()+(sa["FTR"]=="D").sum())
             sl=int((sh["FTR"]=="A").sum()+(sa["FTR"]=="H").sum())
-            gf=int(sh["FTHG"].sum()+sa["FTAG"].sum()); ga=int(sh["FTAG"].sum()+sa["FTHG"].sum())
+            gf=int(sh["FTHG"].sum()+sa["FTAG"].sum())
+            ga=int(sh["FTAG"].sum()+sa["FTHG"].sum())
             seasons_out.append({"season":season,"played":sg,"won":sw,"drawn":sd,"lost":sl,
                                  "gf":gf,"ga":ga,"gd":gf-ga,"points":sw*3+sd})
+
         wins=int((home["FTR"]=="H").sum()+(away["FTR"]=="A").sum())
         draws=int((home["FTR"]=="D").sum()+(away["FTR"]=="D").sum())
         losses=int((home["FTR"]=="A").sum()+(away["FTR"]=="H").sum())
-        gf=int(home["FTHG"].sum()+away["FTAG"].sum()); ga=int(home["FTAG"].sum()+away["FTHG"].sum())
+        gf=int(home["FTHG"].sum()+away["FTAG"].sum())
+        ga=int(home["FTAG"].sum()+away["FTHG"].sum())
         hy=float(home["HY"].mean()) if "HY" in df.columns else 0
         ay=float(away["AY"].mean()) if "AY" in df.columns else 0
+
         return jsonify({
-            "team":team_name,
-            "summary":{"games":all_games,"wins":wins,"draws":draws,"losses":losses,
+            "team": team_name,
+            "summary": {"games":all_games,"wins":wins,"draws":draws,"losses":losses,
                         "goals_for":gf,"goals_against":ga,"goal_diff":gf-ga,
                         "win_rate":round(wins/all_games*100,1),
                         "avg_goals_scored":round(gf/all_games,2),
                         "avg_goals_conceded":round(ga/all_games,2),
                         "avg_home_yellows":round(hy,2),"avg_away_yellows":round(ay,2)},
-            "last_10":last_10,"seasons":seasons_out,
+            "last_10": last_10,
+            "seasons": seasons_out,
         })
     except Exception as e:
-        return jsonify({"error":str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/table")
 def form_table():
@@ -351,56 +406,14 @@ def form_table():
             w=int((h["FTR"]=="H").sum()+(a["FTR"]=="A").sum())
             d=int((h["FTR"]=="D").sum()+(a["FTR"]=="D").sum())
             l=int((h["FTR"]=="A").sum()+(a["FTR"]=="H").sum())
-            gf=int(h["FTHG"].sum()+a["FTAG"].sum()); ga=int(h["FTAG"].sum()+a["FTHG"].sum())
+            gf=int(h["FTHG"].sum()+a["FTAG"].sum())
+            ga=int(h["FTAG"].sum()+a["FTHG"].sum())
             form=get_form(df,team,6)
             rows.append({"team":team,"played":g,"won":w,"drawn":d,"lost":l,
                          "gf":gf,"ga":ga,"gd":gf-ga,"points":w*3+d,"form":form["form_string"]})
         rows.sort(key=lambda x:(-x["points"],-(x["gd"]),-x["gf"]))
         for i,r in enumerate(rows): r["position"]=i+1
         return jsonify({"season":season,"table":rows})
-    except Exception as e:
-        return jsonify({"error":str(e)}), 500
-
-
-@app.route("/api/predict_fixtures", methods=["POST"])
-def predict_fixtures():
-    """Accept fixture list from browser and run predictions"""
-    try:
-        body     = request.get_json(force=True) or {}
-        fixtures = body.get("fixtures", [])
-        gameweek = body.get("gameweek", "?")
-        season   = body.get("season", "2025-26")
-        if not fixtures:
-            return jsonify({"error": "No fixtures provided"}), 400
-        df    = get_df()
-        model = get_model()
-        out   = []
-        for f in fixtures:
-            ht = f.get("home", "").strip()
-            at = f.get("away", "").strip()
-            dt = f.get("date", "")
-            if not ht or not at: continue
-            hf    = get_form(df, ht)
-            af    = get_form(df, at)
-            pred  = predict_match(ht, at, model, hf["multiplier"], af["multiplier"])
-            cards = get_cards(df, ht, at)
-            h2h   = get_h2h(df, ht, at)
-            if pred:
-                out.append({
-                    "fixture_id": f"{ht}-{at}-{dt}",
-                    "match_date": dt, "match_time": f.get("time", ""),
-                    "status": "SCHEDULED", "home_team": ht, "away_team": at,
-                    "prediction": pred, "cards": cards,
-                    "home_form": hf, "away_form": af,
-                    "head_to_head": h2h, "actual": None,
-                })
-        return jsonify({
-            "gameweek": gameweek, "season": season,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "model_version": "v5", "source": "upcoming",
-            "model_accuracy": {"overall":53.3,"home_win":53.9,"away_win":52.7,"over_under":58.0},
-            "fixtures": out,
-        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
