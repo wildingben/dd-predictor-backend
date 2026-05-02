@@ -4,7 +4,6 @@ __pycache__/
 .env
 .DS_Store
 data/raw/
-*.csv
 predictions/
 results/
 venv/
