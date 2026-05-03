@@ -3,7 +3,7 @@ __pycache__/
 *.pyo
 .env
 .DS_Store
-data/raw/
+*.csv
 predictions/
 results/
 venv/
