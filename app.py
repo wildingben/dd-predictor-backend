@@ -326,126 +326,12 @@ def process_matches(matches, gameweek, season):
 
 # ── ROUTES ──
 
-@app.route("/api/health")
-def health():
-    df=get_df()
-    return jsonify({"status":"ok","model":"DD Predictor v6",
-                    "timestamp":datetime.now(timezone.utc).isoformat(),
-                    "seasons":df["Season"].unique().tolist(),
-                    "latest_season":df["Season"].max(),"total_fixtures":len(df)})
-
-@app.route("/api/seasons")
-def seasons():
-    df=get_df()
-    result=[]
-    for season in sorted(df["Season"].unique()):
-        s=df[df["Season"]==season]; gws=sorted(s["GW"].unique().tolist())
-        result.append({"season":season,"gameweeks":gws,"max_gw":max(gws),"fixtures":len(s)})
-    return jsonify({"seasons":result})
-
-@app.route("/api/predictions/<int:gameweek>")
-def predictions(gameweek):
-    try:
-        url=f"{FD_BASE}/competitions/PL/matches"
-        matches=[]; season_label="2025-26"
-        for year,label in [(2025,"2025-26"),(2024,"2024-25")]:
-            resp=requests.get(url,headers=FD_HEADERS,params={"matchday":gameweek,"season":year},timeout=15)
-            if resp.status_code==200:
-                matches=resp.json().get("matches",[])
-                if matches: season_label=label; break
-        if not matches:
-            return jsonify({"error":f"No fixtures found for Gameweek {gameweek}."}),404
-        return process_matches(matches,gameweek,season_label)
-    except Exception as e:
-        return jsonify({"error":str(e)}),500
-
-@app.route("/api/reload",methods=["POST"])
-def reload():
-    try:
-        reload_all(); df=get_df()
-        return jsonify({"status":"reloaded","fixtures":len(df),
-                        "seasons":df["Season"].unique().tolist()})
-    except Exception as e:
-        return jsonify({"error":str(e)}),500
-
-@app.route("/api/team/<team_name>")
-def team_stats(team_name):
-    try:
-        df=get_df()
-        home=df[df["HomeTeam"]==team_name]; away=df[df["AwayTeam"]==team_name]
-        all_games=len(home)+len(away)
-        if all_games==0: return jsonify({"error":f"Team '{team_name}' not found"}),404
-        h=home[["Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR","HY","AY"]].copy()
-        h["TeamGoals"]=h["FTHG"]; h["OppGoals"]=h["FTAG"]; h["Opponent"]=h["AwayTeam"]
-        h["Venue"]="Home"; h["Result"]=h["FTR"].map({"H":"W","D":"D","A":"L"}); h["Yellows"]=h["HY"]
-        a=away[["Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR","HY","AY"]].copy()
-        a["TeamGoals"]=a["FTAG"]; a["OppGoals"]=a["FTHG"]; a["Opponent"]=a["HomeTeam"]
-        a["Venue"]="Away"; a["Result"]=a["FTR"].map({"A":"W","D":"D","H":"L"}); a["Yellows"]=a["AY"]
-        recent=pd.concat([h,a]).sort_values("Date",ascending=False).head(10)
-        last_10=[{"date":r["Date"].strftime("%Y-%m-%d"),"opponent":r["Opponent"],
-                  "venue":r["Venue"],"score":f"{int(r['TeamGoals'])}-{int(r['OppGoals'])}",
-                  "result":r["Result"],"yellows":int(r["Yellows"]) if not pd.isna(r["Yellows"]) else 0}
-                 for _,r in recent.iterrows()]
-        seasons_out=[]
-        for season in sorted(df["Season"].unique()):
-            sh=df[(df["HomeTeam"]==team_name)&(df["Season"]==season)]
-            sa=df[(df["AwayTeam"]==team_name)&(df["Season"]==season)]
-            sg=len(sh)+len(sa)
-            if sg==0: continue
-            sw=int((sh["FTR"]=="H").sum()+(sa["FTR"]=="A").sum())
-            sd=int((sh["FTR"]=="D").sum()+(sa["FTR"]=="D").sum())
-            sl=int((sh["FTR"]=="A").sum()+(sa["FTR"]=="H").sum())
-            gf=int(sh["FTHG"].sum()+sa["FTAG"].sum()); ga=int(sh["FTAG"].sum()+sa["FTHG"].sum())
-            seasons_out.append({"season":season,"played":sg,"won":sw,"drawn":sd,"lost":sl,
-                                 "gf":gf,"ga":ga,"gd":gf-ga,"points":sw*3+sd})
-        wins=int((home["FTR"]=="H").sum()+(away["FTR"]=="A").sum())
-        draws=int((home["FTR"]=="D").sum()+(away["FTR"]=="D").sum())
-        losses=int((home["FTR"]=="A").sum()+(away["FTR"]=="H").sum())
-        gf=int(home["FTHG"].sum()+away["FTAG"].sum()); ga=int(home["FTAG"].sum()+away["FTHG"].sum())
-        hy=float(home["HY"].mean()) if "HY" in df.columns else 0
-        ay=float(away["AY"].mean()) if "AY" in df.columns else 0
-        return jsonify({"team":team_name,
-            "summary":{"games":all_games,"wins":wins,"draws":draws,"losses":losses,
-                        "goals_for":gf,"goals_against":ga,"goal_diff":gf-ga,
-                        "win_rate":round(wins/all_games*100,1),
-                        "avg_goals_scored":round(gf/all_games,2),
-                        "avg_goals_conceded":round(ga/all_games,2),
-                        "avg_home_yellows":round(hy,2),"avg_away_yellows":round(ay,2)},
-            "last_10":last_10,"seasons":seasons_out})
-    except Exception as e:
-        return jsonify({"error":str(e)}),500
-
-@app.route("/api/table")
-def form_table():
-    try:
-        df=get_df()
-        season=request.args.get("season",df["Season"].max())
-        s=df[df["Season"]==season]
-        teams=sorted(set(s["HomeTeam"].tolist()+s["AwayTeam"].tolist()))
-        rows=[]
-        for team in teams:
-            h=s[s["HomeTeam"]==team]; a=s[s["AwayTeam"]==team]; g=len(h)+len(a)
-            if g==0: continue
-            w=int((h["FTR"]=="H").sum()+(a["FTR"]=="A").sum())
-            d=int((h["FTR"]=="D").sum()+(a["FTR"]=="D").sum())
-            l=int((h["FTR"]=="A").sum()+(a["FTR"]=="H").sum())
-            gf=int(h["FTHG"].sum()+a["FTAG"].sum()); ga=int(h["FTAG"].sum()+a["FTHG"].sum())
-            form=get_form(df,team,6)
-            rows.append({"team":team,"played":g,"won":w,"drawn":d,"lost":l,
-                         "gf":gf,"ga":ga,"gd":gf-ga,"points":w*3+d,"form":form["form_string"]})
-        rows.sort(key=lambda x:(-x["points"],-(x["gd"]),-x["gf"]))
-        for i,r in enumerate(rows): r["position"]=i+1
-        return jsonify({"season":season,"table":rows})
-    except Exception as e:
-        return jsonify({"error":str(e)}),500
-
-
 @app.route("/api/value_bets/<int:gameweek>")
 def value_bets(gameweek):
     """
     Find Away Win value bets for a gameweek.
-    Strategy: 5-8% edge over bookmaker implied probability.
-    Uses Bet365 and average market odds from football-data.org API.
+    For historical gameweeks: uses closing odds from our CSV.
+    Strategy: Away Win with 5-8% edge over bookmaker implied probability.
     """
     try:
         url = f"{FD_BASE}/competitions/PL/matches"
@@ -472,6 +358,7 @@ def value_bets(gameweek):
             at = norm(m["awayTeam"]["name"])
             dt = m.get("utcDate","")[:10]
             tm = m.get("utcDate","")[11:16]
+            status = m.get("status","SCHEDULED")
 
             hf = get_form(df, ht)
             af = get_form(df, at)
@@ -484,35 +371,69 @@ def value_bets(gameweek):
 
             away_prob = pred["prob_away_win"] / 100.0
 
-            # We don't have live odds yet — use historical avg odds for this team pair
-            # as a proxy. Flag for live odds integration later.
-            hist = df[
-                (df["HomeTeam"]==ht) & (df["AwayTeam"]==at)
-            ].sort_values("Date", ascending=False).head(3)
+            # Look up historical odds from CSV for this fixture
+            hist_match = df[
+                (df["HomeTeam"]==ht) &
+                (df["AwayTeam"]==at) &
+                (df["Date"].dt.strftime("%Y-%m-%d")==dt)
+            ]
 
-            # Calculate implied probability from prediction probabilities
-            # Until live odds are added, show model data only
+            avg_odds  = None
+            b365_odds = None
+            away_edge = None
+            has_odds  = False
+
+            if len(hist_match) > 0 and "AvgA" in hist_match.columns:
+                row = hist_match.iloc[0]
+                avg_odds  = float(row["AvgA"]) if not pd.isna(row.get("AvgA")) else None
+                b365_odds = float(row["B365A"]) if "B365A" in row.index and not pd.isna(row.get("B365A")) else None
+
+                if avg_odds and avg_odds > 1.0:
+                    implied = 1.0 / avg_odds
+                    away_edge = round(away_prob - implied, 4)
+                    has_odds = True
+
+            # For future/unplayed fixtures without odds yet
+            if not has_odds:
+                avg_odds  = None
+                b365_odds = None
+                away_edge = None
+
             fixture_data = {
                 "home_team":   ht,
                 "away_team":   at,
                 "match_date":  dt,
                 "match_time":  tm,
+                "status":      status,
                 "prob_home":   pred["prob_home_win"],
                 "prob_draw":   pred["prob_draw"],
                 "prob_away":   pred["prob_away_win"],
-                "away_edge":   None,
-                "avg_odds":    None,
-                "b365_odds":   None,
+                "away_prob":   round(away_prob, 4),
+                "avg_odds":    avg_odds,
+                "b365_odds":   b365_odds,
+                "away_edge":   away_edge,
+                "has_odds":    has_odds,
+                "model_prob":  round(away_prob, 4),
+                "implied_prob": round(1.0/avg_odds, 4) if avg_odds and avg_odds > 1.0 else None,
+                "expected_value": round((away_prob * (avg_odds-1)) - (1-away_prob), 4) if avg_odds and avg_odds > 1.0 else None,
             }
             all_fixtures.append(fixture_data)
 
+            # Value bet criteria: 5-8% edge, has odds
+            if has_odds and away_edge is not None and 0.05 <= away_edge < 0.08:
+                value_bets_list.append(fixture_data)
+
+        # Sort value bets by edge descending
+        value_bets_list.sort(key=lambda x: x["away_edge"] or 0, reverse=True)
+
         return jsonify({
-            "gameweek":    gameweek,
-            "season":      season_label,
-            "value_bets":  value_bets_list,
-            "all_fixtures": all_fixtures,
-            "note":        "Live odds coming soon. Value bet edge calculated vs historical market average.",
-            "strategy":    {"market":"Away Win","min_edge":0.05,"max_edge":0.08},
+            "gameweek":     gameweek,
+            "season":       season_label,
+            "value_bets":   value_bets_list,
+            "all_fixtures":  all_fixtures,
+            "strategy":     {"market":"Away Win","min_edge":0.05,"max_edge":0.08},
+            "has_live_odds": False,
+            "note":         "Using closing odds from historical data. Live odds coming soon.",
         })
 
     except Exception as e:
