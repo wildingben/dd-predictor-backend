@@ -465,6 +465,31 @@ def predictions(gameweek):
         return process_matches(matches, gameweek, season_label)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route("/api/table")
+def table():
+    try:
+        df = get_df()
+        tbl = get_table()
+        teams = sorted(tbl.keys(), key=lambda t: tbl[t])
+        rows = []
+        for team in teams:
+            hm = df[df["HomeTeam"]==team]
+            am = df[df["AwayTeam"]==team]
+            played = len(hm) + len(am)
+            won = int((hm["FTR"]=="H").sum() + (am["FTR"]=="A").sum())
+            drawn = int((hm["FTR"]=="D").sum() + (am["FTR"]=="D").sum())
+            lost = played - won - drawn
+            gf = int(hm["FTHG"].sum() + am["FTAG"].sum())
+            ga = int(hm["FTAG"].sum() + am["FTHG"].sum())
+            form_data = get_form(df, team)
+            rows.append({"position": tbl[team], "team": team, "played": played,
+                "won": won, "drawn": drawn, "lost": lost,
+                "gf": gf, "ga": ga, "gd": gf-ga, "points": won*3+drawn,
+                "form": form_data.get("form_string", "")})
+        season = df["Season"].iloc[-1] if "Season" in df.columns else "2024-25"
+        return jsonify({"season": season, "table": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port,debug=False)
