@@ -446,6 +446,25 @@ def value_bets(gameweek):
     except Exception as e:
         return jsonify({"error":str(e)}), 500
 
+@app.route("/api/predictions/<int:gameweek>")
+def predictions(gameweek):
+    try:
+        url = f"{FD_BASE}/competitions/PL/matches"
+        matches = []
+        season_label = "2025-26"
+        for year, label in [(2025, "2025-26"), (2024, "2024-25")]:
+            resp = requests.get(url, headers=FD_HEADERS,
+                                params={"matchday": gameweek, "season": year}, timeout=15)
+            if resp.status_code == 200:
+                matches = resp.json().get("matches", [])
+                if matches:
+                    season_label = label
+                    break
+        if not matches:
+            return jsonify({"error": f"No fixtures found for Gameweek {gameweek}"}), 404
+        return process_matches(matches, gameweek, season_label)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port,debug=False)
